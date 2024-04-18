@@ -70,6 +70,7 @@ needs_concrete_A(alg::AbstractKrylovSubspaceMethod) = false
 needs_concrete_A(alg::AbstractSolveFunction) = false
 
 # Util
+## This is a check exclusively based on the size and not on the actual rank of the matrix
 is_underdetermined(x) = false
 is_underdetermined(A::AbstractMatrix) = size(A, 1) < size(A, 2)
 is_underdetermined(A::AbstractSciMLOperator) = size(A, 1) < size(A, 2)
