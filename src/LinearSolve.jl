@@ -5,46 +5,48 @@ if isdefined(Base, :Experimental) &&
 end
 
 import PrecompileTools
+using ArrayInterface
+using Base: cache_dependencies, Bool
+using LinearAlgebra
+using LazyArrays: @~, BroadcastArray
+using SciMLBase: AbstractLinearAlgorithm, LinearAliasSpecifier
+using SciMLOperators
+using SciMLOperators: AbstractSciMLOperator, IdentityOperator
+using Setfield
+using UnPack
+using DocStringExtensions
+using EnumX
+using Markdown
+using ChainRulesCore
+import InteractiveUtils
+import RecursiveArrayTools
 
-PrecompileTools.@recompile_invalidations begin
-    using ArrayInterface
-    using RecursiveFactorization
-    using Base: cache_dependencies, Bool
-    using LinearAlgebra
-    using SparseArrays
-    using SparseArrays: AbstractSparseMatrixCSC, nonzeros, rowvals, getcolptr
-    using SciMLBase: AbstractLinearAlgorithm
-    using SciMLOperators
-    using SciMLOperators: AbstractSciMLOperator, IdentityOperator
-    using Setfield
-    using UnPack
-    using KLU
-    using Sparspak
-    using FastLapackInterface
-    using DocStringExtensions
-    using EnumX
-    import InteractiveUtils
+import StaticArraysCore: StaticArray, SVector, MVector, SMatrix, MMatrix
 
-    import StaticArraysCore: StaticArray, SVector, MVector, SMatrix, MMatrix
+using LinearAlgebra: BlasInt, LU
+using LinearAlgebra.LAPACK: require_one_based_indexing,
+                            chkfinite, chkstride1,
+                            @blasfunc, chkargsok
 
-    using LinearAlgebra: BlasInt, LU
-    using LinearAlgebra.LAPACK: require_one_based_indexing,
-        chkfinite, chkstride1,
-        @blasfunc, chkargsok
+import GPUArraysCore
+import Preferences
+import ConcreteStructs: @concrete
 
-    import GPUArraysCore
-    import Preferences
-    import ConcreteStructs: @concrete
+# wrap
+import Krylov
+using SciMLBase
+import Preferences
 
-    # wrap
-    import Krylov
-    using SciMLBase
-    import Preferences
-end
+const CRC = ChainRulesCore
 
-if Preferences.@load_preference("LoadMKL_JLL", true)
-    using MKL_jll
-    const usemkl = MKL_jll.is_available()
+@static if Sys.ARCH === :x86_64 || Sys.ARCH === :i686
+    if Preferences.@load_preference("LoadMKL_JLL",
+        !occursin("EPYC", Sys.cpu_info()[1].model))
+        using MKL_jll
+        const usemkl = MKL_jll.is_available()
+    else
+        const usemkl = false
+    end
 else
     const usemkl = false
 end
@@ -55,12 +57,15 @@ using SciMLBase: _unwrap_val
 
 abstract type SciMLLinearSolveAlgorithm <: SciMLBase.AbstractLinearAlgorithm end
 abstract type AbstractFactorization <: SciMLLinearSolveAlgorithm end
+abstract type AbstractSparseFactorization <: AbstractFactorization end
+abstract type AbstractDenseFactorization <: AbstractFactorization end
 abstract type AbstractKrylovSubspaceMethod <: SciMLLinearSolveAlgorithm end
 abstract type AbstractSolveFunction <: SciMLLinearSolveAlgorithm end
 
 # Traits
 
 needs_concrete_A(alg::AbstractFactorization) = true
+needs_concrete_A(alg::AbstractSparseFactorization) = true
 needs_concrete_A(alg::AbstractKrylovSubspaceMethod) = false
 needs_concrete_A(alg::AbstractSolveFunction) = false
 
@@ -77,11 +82,18 @@ _isidentity_struct(::SciMLOperators.IdentityOperator) = true
 # Dispatch Friendly way to check if an extension is loaded
 __is_extension_loaded(::Val) = false
 
+# Check if a sparsity pattern has changed
+pattern_changed(fact, A) = false
+
 function _fast_sym_givens! end
 
 # Code
 
-const INCLUDE_SPARSE = Preferences.@load_preference("include_sparse", Base.USE_GPL_LIBS)
+issparsematrixcsc(A) = false
+handle_sparsematrixcsc_lu(A) = lu(A)
+issparsematrix(A) = false
+make_SparseMatrixCSC(A) = nothing
+makeempty_SparseMatrixCSC(A) = nothing
 
 EnumX.@enumx DefaultAlgorithmChoice begin
     LUFactorization
@@ -114,6 +126,7 @@ end
 const BLASELTYPES = Union{Float32, Float64, ComplexF32, ComplexF64}
 
 include("common.jl")
+include("extension_algs.jl")
 include("factorization.jl")
 include("appleaccelerate.jl")
 include("mkl.jl")
@@ -124,34 +137,37 @@ include("preconditioners.jl")
 include("solve_function.jl")
 include("default.jl")
 include("init.jl")
-include("extension_algs.jl")
+include("adjoint.jl")
 include("deprecated.jl")
 
+@inline function _notsuccessful(F::LinearAlgebra.QRCompactWY)
+    (m, n) = size(F)
+    U = view(F.factors, 1:min(m, n), 1:n)
+    return any(iszero, Iterators.reverse(@view U[diagind(U)]))
+end
+@inline _notsuccessful(F) = hasmethod(LinearAlgebra.issuccess, (typeof(F),)) ?
+                            !LinearAlgebra.issuccess(F) : false
+
 @generated function SciMLBase.solve!(cache::LinearCache, alg::AbstractFactorization;
-    kwargs...)
+        kwargs...)
     quote
         if cache.isfresh
             fact = do_factorization(alg, cache.A, cache.b, cache.u)
             cache.cacheval = fact
+
+            # If factorization was not successful, return failure. Don't reset `isfresh`
+            if _notsuccessful(fact)
+                return SciMLBase.build_linear_solution(
+                    alg, cache.u, nothing, cache; retcode = ReturnCode.Failure)
+            end
+
             cache.isfresh = false
         end
+
         y = _ldiv!(cache.u, @get_cacheval(cache, $(Meta.quot(defaultalg_symbol(alg)))),
             cache.b)
-
-        #=
-        retcode = if LinearAlgebra.issuccess(fact)
-            SciMLBase.ReturnCode.Success
-        else
-            SciMLBase.ReturnCode.Failure
-        end
-        SciMLBase.build_linear_solution(alg, y, nothing, cache; retcode = retcode)
-        =#
-        SciMLBase.build_linear_solution(alg, y, nothing, cache)
+        return SciMLBase.build_linear_solution(alg, y, nothing, cache)
     end
-end
-
-@static if INCLUDE_SPARSE
-    include("factorization_sparse.jl")
 end
 
 # Solver Specific Traits
@@ -182,59 +198,50 @@ end
 const IS_OPENBLAS = Ref(true)
 isopenblas() = IS_OPENBLAS[]
 
+const HAS_APPLE_ACCELERATE = Ref(false)
+appleaccelerate_isavailable() = HAS_APPLE_ACCELERATE[]
+
 PrecompileTools.@compile_workload begin
     A = rand(4, 4)
     b = rand(4)
     prob = LinearProblem(A, b)
     sol = solve(prob)
     sol = solve(prob, LUFactorization())
-    sol = solve(prob, RFLUFactorization())
     sol = solve(prob, KrylovJL_GMRES())
 end
 
-@static if INCLUDE_SPARSE
-    PrecompileTools.@compile_workload begin
-        A = sprand(4, 4, 0.3) + I
-        b = rand(4)
-        prob = LinearProblem(A, b)
-        sol = solve(prob, KLUFactorization())
-        sol = solve(prob, UMFPACKFactorization())
-    end
-end
-
-PrecompileTools.@compile_workload begin
-    A = sprand(4, 4, 0.3) + I
-    b = rand(4)
-    prob = LinearProblem(A * A', b)
-    sol = solve(prob) # in case sparspak is used as default
-    sol = solve(prob, SparspakFactorization())
-end
+ALREADY_WARNED_CUDSS = Ref{Bool}(false)
+error_no_cudss_lu(A) = nothing
+cudss_loaded(A) = false
 
 export LUFactorization, SVDFactorization, QRFactorization, GenericFactorization,
-    GenericLUFactorization, SimpleLUFactorization, RFLUFactorization,
-    NormalCholeskyFactorization, NormalBunchKaufmanFactorization,
-    UMFPACKFactorization, KLUFactorization, FastLUFactorization, FastQRFactorization,
-    SparspakFactorization, DiagonalFactorization, CholeskyFactorization,
-    BunchKaufmanFactorization, CHOLMODFactorization, LDLtFactorization
+       GenericLUFactorization, SimpleLUFactorization, RFLUFactorization,
+       NormalCholeskyFactorization, NormalBunchKaufmanFactorization,
+       UMFPACKFactorization, KLUFactorization, FastLUFactorization, FastQRFactorization,
+       SparspakFactorization, DiagonalFactorization, CholeskyFactorization,
+       BunchKaufmanFactorization, CHOLMODFactorization, LDLtFactorization
 
 export LinearSolveFunction, DirectLdiv!
 
 export KrylovJL, KrylovJL_CG, KrylovJL_MINRES, KrylovJL_GMRES,
-    KrylovJL_BICGSTAB, KrylovJL_LSMR, KrylovJL_CRAIGMR,
-    IterativeSolversJL, IterativeSolversJL_CG, IterativeSolversJL_GMRES,
-    IterativeSolversJL_BICGSTAB, IterativeSolversJL_MINRES, IterativeSolversJL_IDRS,
-    KrylovKitJL, KrylovKitJL_CG, KrylovKitJL_GMRES
+       KrylovJL_BICGSTAB, KrylovJL_LSMR, KrylovJL_CRAIGMR,
+       IterativeSolversJL, IterativeSolversJL_CG, IterativeSolversJL_GMRES,
+       IterativeSolversJL_BICGSTAB, IterativeSolversJL_MINRES, IterativeSolversJL_IDRS,
+       KrylovKitJL, KrylovKitJL_CG, KrylovKitJL_GMRES, KrylovJL_MINARES
 
 export SimpleGMRES
 
 export HYPREAlgorithm
 export CudaOffloadFactorization
 export MKLPardisoFactorize, MKLPardisoIterate
+export PanuaPardisoFactorize, PanuaPardisoIterate
 export PardisoJL
 export MKLLUFactorization
 export AppleAccelerateLUFactorization
 export MetalLUFactorization
 
 export OperatorAssumptions, OperatorCondition
+
+export LinearSolveAdjoint
 
 end

@@ -1,28 +1,28 @@
-using LinearSolve, LinearAlgebra, SparseArrays, Test, JET
+using LinearSolve, RecursiveFactorization, LinearAlgebra, SparseArrays, Test, JET
 @test LinearSolve.defaultalg(nothing, zeros(3)).alg ===
       LinearSolve.DefaultAlgorithmChoice.GenericLUFactorization
 prob = LinearProblem(rand(3, 3), rand(3))
 solve(prob)
 
 if LinearSolve.appleaccelerate_isavailable()
-      @test LinearSolve.defaultalg(nothing, zeros(50)).alg ===
-      LinearSolve.DefaultAlgorithmChoice.AppleAccelerateLUFactorization
+    @test LinearSolve.defaultalg(nothing, zeros(50)).alg ===
+          LinearSolve.DefaultAlgorithmChoice.AppleAccelerateLUFactorization
 else
-      @test LinearSolve.defaultalg(nothing, zeros(50)).alg ===
-            LinearSolve.DefaultAlgorithmChoice.RFLUFactorization
+    @test LinearSolve.defaultalg(nothing, zeros(50)).alg ===
+          LinearSolve.DefaultAlgorithmChoice.RFLUFactorization
 end
 prob = LinearProblem(rand(50, 50), rand(50))
 solve(prob)
 
 if LinearSolve.usemkl
-      @test LinearSolve.defaultalg(nothing, zeros(600)).alg ===
-      LinearSolve.DefaultAlgorithmChoice.MKLLUFactorization
+    @test LinearSolve.defaultalg(nothing, zeros(600)).alg ===
+          LinearSolve.DefaultAlgorithmChoice.MKLLUFactorization
 elseif LinearSolve.appleaccelerate_isavailable()
-      @test LinearSolve.defaultalg(nothing, zeros(600)).alg ===
-      LinearSolve.DefaultAlgorithmChoice.AppleAccelerateLUFactorization
+    @test LinearSolve.defaultalg(nothing, zeros(600)).alg ===
+          LinearSolve.DefaultAlgorithmChoice.AppleAccelerateLUFactorization
 else
-      @test LinearSolve.defaultalg(nothing, zeros(600)).alg ===
-      LinearSolve.DefaultAlgorithmChoice.LUFactorization
+    @test LinearSolve.defaultalg(nothing, zeros(600)).alg ===
+          LinearSolve.DefaultAlgorithmChoice.LUFactorization
 end
 
 prob = LinearProblem(rand(600, 600), rand(600))
@@ -34,6 +34,12 @@ solve(prob)
 @test LinearSolve.defaultalg(nothing, zeros(5),
     LinearSolve.OperatorAssumptions(false)).alg ===
       LinearSolve.DefaultAlgorithmChoice.QRFactorization
+
+A = spzeros(2, 2)
+# test that solving a singular problem doesn't error
+prob = LinearProblem(A, ones(2))
+@test solve(prob, UMFPACKFactorization()).retcode == ReturnCode.Infeasible
+@test solve(prob, KLUFactorization()).retcode == ReturnCode.Infeasible
 
 @test LinearSolve.defaultalg(sprand(10^4, 10^4, 1e-5) + I, zeros(1000)).alg ===
       LinearSolve.DefaultAlgorithmChoice.KLUFactorization
@@ -106,3 +112,35 @@ prob = LinearProblem(funcop, b)
 sol1 = solve(prob)
 sol2 = solve(prob, LinearSolve.KrylovJL_CRAIGMR())
 @test sol1.u == sol2.u
+
+# Default for Underdetermined problem but the size is a long rectangle
+A = [2.0 1.0
+     0.0 0.0
+     0.0 0.0]
+b = [1.0, 0.0, 0.0]
+prob = LinearProblem(A, b)
+sol = solve(prob)
+
+@test !SciMLBase.successful_retcode(sol.retcode)
+
+## Show that we cannot select a default alg once by checking the rank, since it might change
+## later in the cache
+## Common occurrence for iterative nonlinear solvers using linear solve
+A = [2.0 1.0
+     1.0 1.0
+     0.0 0.0]
+b = [1.0, 1.0, 0.0]
+prob = LinearProblem(A, b)
+
+cache = init(prob)
+sol = solve!(cache)
+
+@test sol.u ≈ [0.0, 1.0]
+
+cache.A = [2.0 1.0
+           0.0 0.0
+           0.0 0.0]
+
+sol = solve!(cache)
+
+@test !SciMLBase.successful_retcode(sol.retcode)

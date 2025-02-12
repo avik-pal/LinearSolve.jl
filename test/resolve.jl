@@ -1,16 +1,22 @@
 using LinearSolve, LinearAlgebra, SparseArrays, InteractiveUtils, Test
+using LinearSolve: AbstractDenseFactorization, AbstractSparseFactorization
 
-for alg in subtypes(LinearSolve.AbstractFactorization)
+for alg in vcat(InteractiveUtils.subtypes(AbstractDenseFactorization),
+    InteractiveUtils.subtypes(AbstractSparseFactorization))
+    if alg in [PardisoJL]
+        ## Pardiso has extra tests in test/pardiso/pardiso.jl
+        continue
+    end
     @show alg
     if !(alg in [
-        DiagonalFactorization,
-        CudaOffloadFactorization,
-        AppleAccelerateLUFactorization,
-        MetalLUFactorization,
-    ]) &&
+           DiagonalFactorization,
+           CudaOffloadFactorization,
+           AppleAccelerateLUFactorization,
+           MetalLUFactorization
+       ]) &&
        (!(alg == AppleAccelerateLUFactorization) ||
         LinearSolve.appleaccelerate_isavailable()) &&
-        (!(alg == MKLLUFactorization) || LinearSolve.usemkl)
+       (!(alg == MKLLUFactorization) || LinearSolve.usemkl)
         A = [1.0 2.0; 3.0 4.0]
         alg in [KLUFactorization, UMFPACKFactorization, SparspakFactorization] &&
             (A = sparse(A))
@@ -21,7 +27,8 @@ for alg in subtypes(LinearSolve.AbstractFactorization)
         alg in [LDLtFactorization] && (A = SymTridiagonal(A))
         b = [1.0, 2.0]
         prob = LinearProblem(A, b)
-        linsolve = init(prob, alg(), alias_A = false, alias_b = false)
+        linsolve = init(
+            prob, alg(), alias = LinearAliasSpecifier(alias_A = false, alias_b = false))
         @test solve!(linsolve).u ≈ [-2.0, 1.5]
         @test !linsolve.isfresh
         @test solve!(linsolve).u ≈ [-2.0, 1.5]
@@ -42,7 +49,8 @@ end
 A = Diagonal([1.0, 4.0])
 b = [1.0, 2.0]
 prob = LinearProblem(A, b)
-linsolve = init(prob, DiagonalFactorization(), alias_A = false, alias_b = false)
+linsolve = init(prob, DiagonalFactorization(),
+    alias = LinearAliasSpecifier(alias_A = false, alias_b = false))
 @test solve!(linsolve).u ≈ [1.0, 0.5]
 @test solve!(linsolve).u ≈ [1.0, 0.5]
 A = Diagonal([1.0, 4.0])
@@ -50,19 +58,20 @@ linsolve.A = A
 @test solve!(linsolve).u ≈ [1.0, 0.5]
 
 A = Symmetric([1.0 2.0
-    2.0 1.0])
+               2.0 1.0])
 b = [1.0, 2.0]
 prob = LinearProblem(A, b)
-linsolve = init(prob, BunchKaufmanFactorization(), alias_A = false, alias_b = false)
+linsolve = init(prob, BunchKaufmanFactorization(),
+    alias = LinearAliasSpecifier(alias_A = false, alias_b = false))
 @test solve!(linsolve).u ≈ [1.0, 0.0]
 @test solve!(linsolve).u ≈ [1.0, 0.0]
 A = Symmetric([1.0 2.0
-    2.0 1.0])
+               2.0 1.0])
 linsolve.A = A
 @test solve!(linsolve).u ≈ [1.0, 0.0]
 
 A = [1.0 2.0
-    2.0 1.0]
+     2.0 1.0]
 A = Symmetric(A * A')
 b = [1.0, 2.0]
 prob = LinearProblem(A, b)
@@ -70,7 +79,7 @@ linsolve = init(prob, CholeskyFactorization(), alias_A = false, alias_b = false)
 @test solve!(linsolve).u ≈ [-1 / 3, 2 / 3]
 @test solve!(linsolve).u ≈ [-1 / 3, 2 / 3]
 A = [1.0 2.0
-    2.0 1.0]
+     2.0 1.0]
 A = Symmetric(A * A')
 b = [1.0, 2.0]
 @test solve!(linsolve).u ≈ [-1 / 3, 2 / 3]

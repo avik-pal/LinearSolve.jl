@@ -1,7 +1,7 @@
 using HYPRE
 using HYPRE.LibHYPRE: HYPRE_BigInt,
-    HYPRE_Complex, HYPRE_IJMatrixGetValues,
-    HYPRE_IJVectorGetValues, HYPRE_Int
+                      HYPRE_Complex, HYPRE_IJMatrixGetValues,
+                      HYPRE_IJVectorGetValues, HYPRE_Int
 using LinearAlgebra
 using LinearSolve
 using MPI
@@ -168,7 +168,5 @@ test_interface(HYPREAlgorithm(HYPRE.PCG(comm)), Pl = HYPRE.BoomerAMG())
 
 # Test MPI execution
 mpitestfile = joinpath(@__DIR__, "hypretests_mpi.jl")
-mpiexec() do mpi
-    r = run(ignorestatus(`$(mpi) -n 2 $(Base.julia_cmd()) $(mpitestfile)`))
-    @test r.exitcode == 0
-end
+r = run(ignorestatus(`$(mpiexec()) -n 2 $(Base.julia_cmd()) $(mpitestfile)`))
+@test r.exitcode == 0

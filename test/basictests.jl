@@ -1,6 +1,6 @@
 using LinearSolve, LinearAlgebra, SparseArrays, MultiFloats, ForwardDiff
-using SciMLOperators
-using IterativeSolvers, KrylovKit, MKL_jll
+using SciMLOperators, RecursiveFactorization, Sparspak, FastLapackInterface
+using IterativeSolvers, KrylovKit, MKL_jll, KrylovPreconditioners
 using Test
 import Random
 
@@ -218,13 +218,12 @@ end
         end
     end
 
-  
     test_algs = [
         LUFactorization(),
         QRFactorization(),
         SVDFactorization(),
         RFLUFactorization(),
-        LinearSolve.defaultalg(prob1.A, prob1.b),
+        LinearSolve.defaultalg(prob1.A, prob1.b)
     ]
 
     if VERSION >= v"1.9" && LinearSolve.usemkl
@@ -268,12 +267,15 @@ end
 
     @testset "KrylovJL" begin
         kwargs = (; gmres_restart = 5)
+        precs = (A, p = nothing) -> (BlockJacobiPreconditioner(A, 2), I)
         algorithms = (
             ("Default", KrylovJL(kwargs...)),
             ("CG", KrylovJL_CG(kwargs...)),
             ("GMRES", KrylovJL_GMRES(kwargs...)),
+            ("GMRES_prec", KrylovJL_GMRES(; precs, ldiv = false, kwargs...)),
             # ("BICGSTAB",KrylovJL_BICGSTAB(kwargs...)),
-            ("MINRES", KrylovJL_MINRES(kwargs...))
+            ("MINRES", KrylovJL_MINRES(kwargs...)),
+            ("MINARES", KrylovJL_MINARES(kwargs...))
         )
         for (name, algorithm) in algorithms
             @testset "$name" begin
@@ -283,15 +285,37 @@ end
         end
     end
 
+    @testset "Reuse precs" begin
+        num_precs_calls = 0
+
+        function countingprecs(A, p = nothing)
+            num_precs_calls += 1
+            (BlockJacobiPreconditioner(A, 2), I)
+        end
+
+        n = 10
+        A = spdiagm(-1 => -ones(n - 1), 0 => fill(10.0, n), 1 => -ones(n - 1))
+        b = rand(n)
+        p = LinearProblem(A, b)
+        x0 = solve(p, KrylovJL_CG(precs = countingprecs, ldiv = false))
+        cache = x0.cache
+        x0 = copy(x0)
+        for i in 4:(n - 3)
+            A[i, i + 3] -= 1.0e-4
+            A[i - 3, i] -= 1.0e-4
+        end
+        LinearSolve.reinit!(cache; A, reuse_precs = true)
+        x1 = copy(solve!(cache))
+        @test all(x0 .< x1) && num_precs_calls == 1
+    end
+
     if VERSION >= v"1.9-"
         @testset "IterativeSolversJL" begin
             kwargs = (; gmres_restart = 5)
             for alg in (("Default", IterativeSolversJL(kwargs...)),
                 ("CG", IterativeSolversJL_CG(kwargs...)),
                 ("GMRES", IterativeSolversJL_GMRES(kwargs...)),
-                ("IDRS", IterativeSolversJL_IDRS(kwargs...))
-                #           ("BICGSTAB",IterativeSolversJL_BICGSTAB(kwargs...)),
-                #            ("MINRES",IterativeSolversJL_MINRES(kwargs...)),
+                ("IDRS", IterativeSolversJL_IDRS(kwargs...))                #           ("BICGSTAB",IterativeSolversJL_BICGSTAB(kwargs...)),                #            ("MINRES",IterativeSolversJL_MINRES(kwargs...)),
             )
                 @testset "$(alg[1])" begin
                     test_interface(alg[2], prob1, prob2)
@@ -424,7 +448,7 @@ end
 
         @testset "LinearSolveFunction" begin
             function sol_func(A, b, u, p, newA, Pl, Pr, solverdata; verbose = true,
-                kwargs...)
+                    kwargs...)
                 if verbose == true
                     println("out-of-place solve")
                 end
@@ -432,7 +456,7 @@ end
             end
 
             function sol_func!(A, b, u, p, newA, Pl, Pr, solverdata; verbose = true,
-                kwargs...)
+                    kwargs...)
                 if verbose == true
                     println("in-place solve")
                 end
@@ -533,4 +557,50 @@ using BlockDiagonals
     test_interface(SimpleGMRES(; blocksize = 2), prob1, prob2)
 
     @test solve(prob1, SimpleGMRES(; blocksize = 2)).u ≈ solve(prob2, SimpleGMRES()).u
+end
+
+@testset "AbstractSparseMatrixCSC" begin
+    struct MySparseMatrixCSC{Tv, Ti} <: SparseArrays.AbstractSparseMatrixCSC{Tv, Ti}
+        csc::SparseMatrixCSC{Tv, Ti}
+    end
+
+    Base.size(m::MySparseMatrixCSC) = size(m.csc)
+    SparseArrays.getcolptr(m::MySparseMatrixCSC) = SparseArrays.getcolptr(m.csc)
+    SparseArrays.rowvals(m::MySparseMatrixCSC) = SparseArrays.rowvals(m.csc)
+    SparseArrays.nonzeros(m::MySparseMatrixCSC) = SparseArrays.nonzeros(m.csc)
+
+    N = 10_000
+    A = spdiagm(1 => -ones(N - 1), 0 => fill(10.0, N), -1 => -ones(N - 1))
+    u0 = ones(size(A, 2))
+
+    b = A * u0
+    B = MySparseMatrixCSC(A)
+    pr = LinearProblem(B, b)
+
+    # test default algorithn
+    @time "solve MySparseMatrixCSC" u=solve(pr)
+    @test norm(u - u0, Inf) < 1.0e-13
+
+    # test Krylov algorithm with reinit!
+    pr = LinearProblem(B, b)
+    solver = KrylovJL_CG()
+    cache = init(pr, solver, maxiters = 1000, reltol = 1.0e-10)
+    u = solve!(cache)
+    A1 = spdiagm(1 => -ones(N - 1), 0 => fill(100.0, N), -1 => -ones(N - 1))
+    b1 = A1 * u0
+    B1 = MySparseMatrixCSC(A1)
+    @test norm(u - u0, Inf) < 1.0e-8
+    reinit!(cache; A = B1, b = b1)
+    u = solve!(cache)
+    @test norm(u - u0, Inf) < 1.0e-8
+
+    # test factorization with reinit!
+    pr = LinearProblem(B, b)
+    solver = SparspakFactorization()
+    cache = init(pr, solver)
+    u = solve!(cache)
+    @test norm(u - u0, Inf) < 1.0e-8
+    reinit!(cache; A = B1, b = b1)
+    u = solve!(cache)
+    @test norm(u - u0, Inf) < 1.0e-8
 end

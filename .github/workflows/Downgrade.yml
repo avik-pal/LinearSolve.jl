@@ -18,12 +18,13 @@ jobs:
         version: ['1']
         group:
           - Core
+          - Enzyme
     steps:
       - uses: actions/checkout@v4
-      - uses: julia-actions/setup-julia@v1
+      - uses: julia-actions/setup-julia@v2
         with:
           version: ${{ matrix.version }}
-      - uses: cjdoris/julia-downgrade-compat-action@v1
+      - uses: julia-actions/julia-downgrade-compat@v1
 #        if: ${{ matrix.version == '1.6' }}
         with:
           skip: Pkg,TOML
